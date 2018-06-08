@@ -1,19 +1,50 @@
-{:is_file} = require "fs"
+{
+  :until_success
+  :command
+  :task_filter
+  :notifies
+} = require 'spookfile_helpers'
+
+{:is_file, :is_present} = require "fs"
+
+-- builtin notifier
+notify.add 'terminal_notifier'
+
+-- user notifiers
+pcall notify.add, 'notifier'
 
 log_level "INFO"
 
+lint = command "moonpick"
 spec = command "busted"
 compile = command "moonc"
 
-watch "src", "spec", ->
-  on_changed "^spec/(.*)_spec%.moon", (a) ->
-    spec "spec/#{a}_spec.moon"
+-- Filters tasks on whether the mapped
+-- file is present (eg. won't run unless it is)
+task_list = task_filter is_present
 
-  on_changed "^src/moonpick/(.+)%.moon", (base) ->
+run_spec = (path, event) ->
+  print "\027[1m\027[34m-> \027[22m(#{path}..)\027[0m"
+  until_success ->
+    notifies path, event,
+      task_list(
+        spec, path,
+        lint, event.path
+      )
+
+watch "src", "spec", ->
+  on_changed "^spec/.+_spec%.moon", (event) ->
+    run_spec event.path, event
+
+  on_changed "^src/moonpick/.+%.moon", (event) ->
+    base = event.path\match '([^/]+)%.moon'
     spec_file = "spec/#{base}_spec.moon"
     spec_file = "spec/moonpick_spec.moon" unless is_file(spec_file)
 
     compile("src/moonpick/#{base}.moon") +
-    spec(spec_file)
+    run_spec(spec_file, event)
 
-notifier "#{os.getenv('HOME')}/.spook/notifiers"
+watch_file 'Spookfile', ->
+  on_changed (event) ->
+    notify.info "Reloading Spookfile..."
+    load_spookfile!

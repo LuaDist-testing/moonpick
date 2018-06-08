@@ -1,17 +1,17 @@
 -- This file was automatically generated for the LuaDist project.
 
 package = "moonpick"
-version = "0.6-1"
+version = "0.7-1"
 
 -- LuaDist source
 source = {
-  tag = "0.6-1",
+  tag = "0.7-1",
   url = "git://github.com/LuaDist-testing/moonpick.git"
 }
 -- Original source
 -- source = {
 --   url = "git://github.com/nilnor/moonpick.git",
---   tag = 'v0.6'
+--   tag = 'v0.7'
 -- }
 
 description = {

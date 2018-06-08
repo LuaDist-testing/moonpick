@@ -55,15 +55,96 @@ a function and still pleasing the linter.
 
 ### Unused loop variables
 
-Unused loop variables are detected. Similarly to unused function arguments it's
-possible to disable this completely in the [configuration](#configuration), or
-to provide an explicit whitelist only for loop variables. Moonpick ships with a
-default configuration that whitelists the arguments 'i' and 'j', or any variable
-starting with a '_'.
+Unused loop variables are detected. It's possible to disable this completely in
+the [configuration](#configuration), or to provide an explicit whitelist only
+for loop variables. Moonpick ships with a default configuration that whitelists
+the arguments 'i' and 'j', or any variable starting with a '_'.
 
 ### Undefined global accesses
 
 Similar to the built-in linter Moonpick detects undefined references.
+
+### Declaration shadowing
+
+Declaration shadowing occurs whenever a declaration shadows an earlier
+declaration with the same name. Consider the following code:
+
+```moonscript
+my_mod = require 'my_mod'
+
+-- [.. more code in between.. ]
+
+for my_mod in get_modules('foo')
+  my_mod.bar!
+```
+
+While it in the example above is rather clear that the `my_mod` declared in the
+loop is different from the top level `my_mod`, this can quickly become less
+clear should more code be inserted between the for declaration and later usage.
+At that point the code becomes ambiguous. Declaration shadowing helps with this
+by ensuring that each variable is defined at most once, in an unambiguous
+manner.
+
+The detection can be turned off completely by setting the `report_shadowing`
+configuration variable to false, and the whitelisting can be configured by
+specifying a `whitelist_shadowing` configuration list.
+
+_Note that for versions of Moonscript earlier than 0.5 these kind of shadowings
+would actually just re-use the prior declaration, leading to easily overlooked
+and confounding bugs._
+
+### Reassignment of function variables
+
+Reassigning of a previously defined variable holding a function value is rarely
+wanted, and is often the result of forgetting an earlier declaration.
+
+```moonscript
+-- with the following declaration and usage
+done = (x) -> x.foo and x.bar
+done({})
+
+-- one might mistakenly reuse the name further down
+i = 1
+-- [..]
+done = i == 10
+```
+
+This can can cause hard to debug issues, particularly if the reassignment is
+only done in a code path that is not always exercised.
+
+The detection can be turned off completely by setting the `report_fndef_reassignments`
+configuration variable to false, and the whitelisting can be configured by
+specifying a `whitelist_fndef_reassignments` configuration list.
+
+### Reassignment of top level variables from a function or method
+
+Reassignment of a top level variable from within a function or method can
+sometimes be the cause of non-obvious and elusive bugs, e.g.:
+
+```moonscript
+module = require 'lib.module'
+
+-- [..] much further down
+get_foo = (y) ->
+  module = y\match('%w+')\lower! -- mistakenly reusing the `module` var
+  return "#{module}_bar"
+```
+
+Should `get_foo` above only be called conditionally this could cause serious
+bugs to go unnoticed.
+
+In contrast to the other detections, this detection is _not_ enabled by default.
+The detection can be turned on by setting the `report_top_level_reassignments`
+configuration variable to true, and the whitelisting can be configured by
+specifying a `whitelist_top_level_reassignments` configuration list. It's highly
+recommended to enable this however.
+
+The reason this is not enabled by default is that it's not uncommon to have
+legitimate code that manipulates top level variables from within sub functions
+or methods. In order to avoid complaints from the linter one would then either
+have to configure the whitelist, or one would need to adopt a different style of
+coding where top level variables are not reassigned (for instance by using a
+table to hold module state instead).
 
 ## Configuration
 
@@ -106,11 +187,15 @@ See the below example (lint_config.moon, using Moonscript syntax):
   whitelist_unused: {
     ["."]: {},
   }
-  -- loop variable and function parameter linting can be disabled
-  -- completely by uncommenting the below
 
-  -- report_loop_variables: false
-  -- report_params: false
+  -- below you'll see the boolean switches controlling the
+  -- linting, shown with the default value
+
+  -- report_loop_variables: true
+  -- report_params: true
+  -- report_shadowing: true
+  -- report_fndef_reassignments: true
+  -- report_top_level_reassignments: false
 }
 ```
 
@@ -183,12 +268,12 @@ configuration options for `file`.
 #### evaluator(config)
 
 Returns an evaluator instance for the given linting options (e.g. as returned by
-`load_config_from`). The evaluator instance provides the following four
-functions (note that these are functions, to be invoked using the ordinary dot
-operator `.`):
+`load_config_from`). The evaluator instance provides the following functions
+(note that these are functions, to be invoked using the ordinary dot operator
+`.`):
 
 `allow_global_access`, `allow_unused_param`, `allow_unused_loop_variable`,
-`allow_unused`.
+`allow_unused`, `allow_fndef_reassignment`, `allow_top_level_reassignment`.
 
 All of these take as their first argument a symbol (as string) and returns
 `true` or `false` depending on whether the symbol passes linting or not.
@@ -202,6 +287,8 @@ code sample that illustrates the incorrect behaviour.
 
 ## License
 
+Copyright 2016-2017 Nils Nordman <nino at nordman.org>
+
 Moonpick is released under the MIT license (see the LICENSE file for the full
 details).
 
@@ -209,3 +296,13 @@ details).
 
 Tests require `busted` to run, as well as the `pl` module (Penlight - `luarock
 install penlight`). Just run `busted` in the project's root directory.
+
+## Running it locally for development purposes
+
+Execute with a specified LUA_PATH pointing to the local `src` directory.
+Presuming a checkout location of `~/code/moonpick`:
+
+```bash
+LUA_PATH="$HOME/code/moonpick/src/?.lua;$HOME/code/moonpick/src/?/init.lua;$(lua -e 'print(package.path)')" ~/code/moonpick/bin/moonpick *.moon
+
+```
