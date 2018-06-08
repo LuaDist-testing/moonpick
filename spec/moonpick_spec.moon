@@ -1,5 +1,7 @@
-base = require 'moonscript.base'
-moonpick = base.loadfile('src/moonpick.moon')!
+-- Copyright 2016 Nils Nordman <nino@nordman.org>
+-- License: MIT (see LICENSE.md at the top-level directory of the distribution)
+
+moonpick = require 'moonpick'
 
 describe 'moonpick', ->
   clean = (code) ->
@@ -123,9 +125,14 @@ describe 'moonpick', ->
       res = lint code, {}
       assert.same {}, res
 
-    it 'respects a given declared_whitelist', ->
-      code = clean 'x = 1'
-      res = lint code, { declared_whitelist: {'x'} }
+    it 'respects a given whitelist_params', ->
+      code = clean '(x) -> 1'
+      res = lint code, { whitelist_params: {'x'} }
+      assert.same {}, res
+
+    it 'respects a given whitelist_loop_variables', ->
+      code = clean 'for x in *{1,2}\n  _G.other = 1'
+      res = lint code, { whitelist_loop_variables: {'x'} }
       assert.same {}, res
 
     it 'does not complain about @variables in methods', ->
@@ -393,7 +400,9 @@ describe 'moonpick', ->
           [ { a, b } for a, b in pairs {} ]
       ]]
       res = lint code
-      assert.same {}, res
+      assert.same {
+        {line: 1, msg: 'declared but unused - `a`'}
+      }, res
 
     it 'handles non-prefixed member access', ->
       code = clean [[

@@ -4,55 +4,8 @@ do
   local _obj_0 = require("moonscript.util")
   pos_to_line, get_line = _obj_0.pos_to_line, _obj_0.get_line
 end
+local config = require("moonpick.config")
 local append = table.insert
-local default_declared_whitelist = {
-  '_G',
-  '...',
-  '_',
-  'tostring'
-}
-local builtin_global_whitelist = {
-  '_G',
-  '_VERSION',
-  'assert',
-  'collectgarbage',
-  'dofile',
-  'error',
-  'getfenv',
-  'getmetatable',
-  'ipairs',
-  'load',
-  'loadfile',
-  'loadstring',
-  'module',
-  'next',
-  'pairs',
-  'pcall',
-  'print',
-  'rawequal',
-  'rawget',
-  'rawset',
-  'require',
-  'select',
-  'setfenv',
-  'setmetatable',
-  'tonumber',
-  'tostring',
-  'type',
-  'unpack',
-  'xpcall',
-  'coroutine',
-  'debug',
-  'io',
-  'math',
-  'os',
-  'package',
-  'string',
-  'table',
-  'true',
-  'false',
-  'nil'
-}
 local Scope
 Scope = function(node, parent)
   assert(node, "Missing node")
@@ -249,6 +202,9 @@ local handlers = {
           pos = node[-1],
           type = 'param'
         })
+        scope:add_ref(def[2], {
+          pos = node[-1]
+        })
         if p[2] then
           walk({
             p[2]
@@ -269,7 +225,7 @@ local handlers = {
     end
     scope:add_declaration(var, {
       pos = node[-1],
-      type = 'for-var'
+      type = 'loop-var'
     })
     walk(args, scope)
     if body then
@@ -290,7 +246,7 @@ local handlers = {
       if type(name) == 'string' then
         scope:add_declaration(name, {
           pos = node[-1],
-          type = 'for-each-var'
+          type = 'loop-var'
         })
       end
     end
@@ -476,19 +432,14 @@ walk = function(tree, scope)
   end
 end
 local report_on_scope
-report_on_scope = function(scope, opts, inspections)
-  if opts == nil then
-    opts = { }
-  end
+report_on_scope = function(scope, evaluator, inspections)
   if inspections == nil then
     inspections = { }
   end
-  local declared_whitelist, global_whitelist
-  declared_whitelist, global_whitelist = opts.declared_whitelist, opts.global_whitelist
   for name, decl in pairs(scope.declared) do
     local _continue_0 = false
     repeat
-      if scope.used[name] or declared_whitelist[name] then
+      if scope.used[name] then
         _continue_0 = true
         break
       end
@@ -496,9 +447,21 @@ report_on_scope = function(scope, opts, inspections)
         _continue_0 = true
         break
       end
-      if decl.type == 'param' and not opts.report_params then
-        _continue_0 = true
-        break
+      if decl.type == 'param' then
+        if evaluator.allow_unused_param(name) then
+          _continue_0 = true
+          break
+        end
+      elseif decl.type == 'loop-var' then
+        if evaluator.allow_unused_loop_variable(name) then
+          _continue_0 = true
+          break
+        end
+      else
+        if evaluator.allow_unused(name) then
+          _continue_0 = true
+          break
+        end
       end
       append(inspections, {
         msg = "declared but unused - `" .. tostring(name) .. "`",
@@ -513,7 +476,7 @@ report_on_scope = function(scope, opts, inspections)
   for name, node in pairs(scope.used) do
     local _continue_0 = false
     repeat
-      if not (scope.declared[name] or global_whitelist[name]) then
+      if not (scope.declared[name] or evaluator.allow_global_access(name)) then
         if name == 'self' or name == 'super' then
           if scope.type == 'method' or scope:has_parent('method') then
             _continue_0 = true
@@ -533,8 +496,8 @@ report_on_scope = function(scope, opts, inspections)
   end
   local _list_0 = scope.scopes
   for _index_0 = 1, #_list_0 do
-    scope = _list_0[_index_0]
-    report_on_scope(scope, opts, inspections)
+    local scope = _list_0[_index_0]
+    report_on_scope(scope, evaluator, inspections)
   end
   return inspections
 end
@@ -555,53 +518,9 @@ report = function(scope, code, opts)
   if opts == nil then
     opts = { }
   end
-  local declared_whitelist
-  do
-    local _tbl_0 = { }
-    local _list_0 = (opts.declared_whitelist or default_declared_whitelist)
-    for _index_0 = 1, #_list_0 do
-      local k = _list_0[_index_0]
-      _tbl_0[k] = true
-    end
-    declared_whitelist = _tbl_0
-  end
-  local global_whitelist = builtin_global_whitelist
-  if opts.global_whitelist then
-    do
-      local _accum_0 = { }
-      local _len_0 = 1
-      for _index_0 = 1, #global_whitelist do
-        local t = global_whitelist[_index_0]
-        _accum_0[_len_0] = t
-        _len_0 = _len_0 + 1
-      end
-      global_whitelist = _accum_0
-    end
-    local _list_0 = opts.global_whitelist
-    for _index_0 = 1, #_list_0 do
-      local t = _list_0[_index_0]
-      append(global_whitelist, t)
-    end
-  end
-  do
-    local _tbl_0 = { }
-    for _index_0 = 1, #global_whitelist do
-      local k = global_whitelist[_index_0]
-      _tbl_0[k] = true
-    end
-    global_whitelist = _tbl_0
-  end
-  local report_params = opts.report_params
-  if report_params == nil then
-    report_params = false
-  end
   local inspections = { }
-  opts = {
-    global_whitelist = global_whitelist,
-    declared_whitelist = declared_whitelist,
-    report_params = report_params
-  }
-  report_on_scope(scope, opts, inspections)
+  local evaluator = config.evaluator(opts)
+  report_on_scope(scope, evaluator, inspections)
   for _index_0 = 1, #inspections do
     local inspection = inspections[_index_0]
     local line = pos_to_line(code, inspection.pos)
@@ -613,60 +532,6 @@ report = function(scope, code, opts)
   end)
   return inspections
 end
-local config_for
-config_for = function(path)
-  local has_moonscript = pcall(require, 'moonscript')
-  local look_for = {
-    'lint_config.lua'
-  }
-  if has_moonscript then
-    look_for[#look_for + 1] = 'lint_config.moon'
-  end
-  local exists
-  exists = function(f)
-    local fh = io.open(f, 'r')
-    if fh then
-      fh:close()
-      return true
-    end
-    return false
-  end
-  path = path:match('(.+)[/\\].+$') or path
-  while path do
-    for _index_0 = 1, #look_for do
-      local name = look_for[_index_0]
-      local config = tostring(path) .. "/" .. tostring(name)
-      if exists(config) then
-        return config
-      end
-    end
-    path = path:match('(.+)[/\\].+$')
-  end
-  return nil
-end
-local load_config
-load_config = function(config_file, file)
-  local loader = loadfile
-  if config_file:match('.moon$') then
-    loader = require("moonscript.base").loadfile
-  end
-  local chunk = assert(loader(config_file))
-  local config = chunk() or { }
-  local opts = { }
-  if config.whitelist_globals then
-    local wl = { }
-    for k, v in pairs(config.whitelist_globals) do
-      if file:find(k) then
-        for _index_0 = 1, #v do
-          local token = v[_index_0]
-          append(wl, token)
-        end
-      end
-    end
-    opts.global_whitelist = wl
-  end
-  return opts
-end
 local lint
 lint = function(code, opts)
   if opts == nil then
@@ -675,6 +540,9 @@ lint = function(code, opts)
   local tree, err = parse.string(code)
   if not (tree) then
     return nil, err
+  end
+  if opts.print_tree then
+    require('moon').p(tree)
   end
   local scope = Scope(tree)
   walk(tree, scope)
@@ -688,15 +556,14 @@ lint_file = function(file, opts)
   local fh = assert(io.open(file, 'r'))
   local code = fh:read('*a')
   fh:close()
-  local config_file = opts.lint_config or config_for(file)
-  opts = config_file and load_config(config_file, file) or { }
+  local config_file = opts.lint_config or config.config_for(file)
+  opts = config_file and config.load_config_from(config_file, file) or { }
   opts.file = file
   return lint(code, opts)
 end
 return {
   lint = lint,
   lint_file = lint_file,
-  config_for = config_for,
-  load_config = load_config,
-  format_inspections = format_inspections
+  format_inspections = format_inspections,
+  config = config
 }

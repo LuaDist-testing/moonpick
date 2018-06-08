@@ -3,59 +3,9 @@
 
 parse = require "moonscript.parse"
 {:pos_to_line, :get_line} = require "moonscript.util"
+config = require "moonpick.config"
 
 append = table.insert
-
-default_declared_whitelist = {
-  '_G',
-  '...',
-  '_',
-  'tostring' -- due to string interpolations
-}
-
-builtin_global_whitelist = {
-  '_G'
-  '_VERSION'
-  'assert'
-  'collectgarbage'
-  'dofile'
-  'error'
-  'getfenv'
-  'getmetatable'
-  'ipairs'
-  'load'
-  'loadfile'
-  'loadstring'
-  'module'
-  'next'
-  'pairs'
-  'pcall'
-  'print'
-  'rawequal'
-  'rawget'
-  'rawset'
-  'require'
-  'select'
-  'setfenv'
-  'setmetatable'
-  'tonumber'
-  'tostring'
-  'type'
-  'unpack'
-  'xpcall'
-  'coroutine'
-  'debug'
-  'io'
-  'math'
-  'os'
-  'package'
-  'string'
-  'table'
-
-  'true',
-  'false',
-  'nil'
-}
 
 Scope = (node, parent) ->
   assert node, "Missing node"
@@ -192,6 +142,7 @@ handlers = {
           walk {p[2]}, scope
       elseif type(def) == 'table' and def[1] == 'self'
         scope\add_declaration def[2], pos: node[-1], type: 'param'
+        scope\add_ref def[2], pos: node[-1]
         if p[2] -- default parameter assignment
           walk {p[2]}, scope
       else
@@ -205,7 +156,7 @@ handlers = {
     unless scope.is_wrapper
       scope = scope\open_scope node, 'for'
 
-    scope\add_declaration var, pos: node[-1], type: 'for-var'
+    scope\add_declaration var, pos: node[-1], type: 'loop-var'
 
     walk args, scope
     walk body, scope if body
@@ -222,7 +173,7 @@ handlers = {
 
     for name in *vars
       if type(name) == 'string'
-        scope\add_declaration name, pos: node[-1], type: 'for-each-var'
+        scope\add_declaration name, pos: node[-1], type: 'loop-var'
 
     walk args, scope if args
     walk body, scope
@@ -348,16 +299,19 @@ walk = (tree, scope) ->
         if type(sub_node) == 'table'
           walk { sub_node }, scope
 
-report_on_scope = (scope, opts = {}, inspections = {}) ->
-  {:declared_whitelist, :global_whitelist} = opts
+report_on_scope = (scope, evaluator, inspections = {}) ->
 
   for name, decl in pairs scope.declared
-    continue if scope.used[name] or declared_whitelist[name]
+    continue if scope.used[name]
     if decl.is_exported or scope.exported_from and scope.exported_from < decl.pos
       continue
 
-    if decl.type == 'param' and not opts.report_params
-      continue
+    if decl.type == 'param'
+      continue if evaluator.allow_unused_param(name)
+    elseif decl.type == 'loop-var'
+      continue if evaluator.allow_unused_loop_variable(name)
+    else
+      continue if evaluator.allow_unused(name)
 
     append inspections, {
       msg: "declared but unused - `#{name}`"
@@ -365,7 +319,7 @@ report_on_scope = (scope, opts = {}, inspections = {}) ->
     }
 
   for name, node in pairs scope.used
-    unless scope.declared[name] or global_whitelist[name]
+    unless scope.declared[name] or evaluator.allow_global_access(name)
       if name == 'self' or name == 'super'
         if scope.type == 'method' or scope\has_parent('method')
           continue
@@ -376,7 +330,7 @@ report_on_scope = (scope, opts = {}, inspections = {}) ->
       }
 
   for scope in *scope.scopes
-    report_on_scope scope, opts, inspections
+    report_on_scope scope, evaluator, inspections
 
   inspections
 
@@ -391,23 +345,9 @@ format_inspections = (inspections) ->
   table.concat chunks, '\n'
 
 report = (scope, code, opts = {}) ->
-  declared_whitelist = {k, true for k in *(opts.declared_whitelist or default_declared_whitelist)}
-  global_whitelist = builtin_global_whitelist
-  if opts.global_whitelist
-    global_whitelist = [t for t in *global_whitelist]
-    append(global_whitelist, t) for t in *opts.global_whitelist
-
-  global_whitelist = {k, true for k in *global_whitelist}
-  report_params = opts.report_params
-  report_params = false if report_params == nil
-
   inspections = {}
-  opts = {
-    :global_whitelist,
-    :declared_whitelist
-    :report_params
-  }
-  report_on_scope scope, opts, inspections
+  evaluator = config.evaluator opts
+  report_on_scope scope, evaluator, inspections
 
   for inspection in *inspections
     line = pos_to_line(code, inspection.pos)
@@ -417,52 +357,10 @@ report = (scope, code, opts = {}) ->
   table.sort inspections, (a, b) -> a.line < b.line
   inspections
 
-config_for = (path) ->
-  has_moonscript = pcall require, 'moonscript'
-  look_for = { 'lint_config.lua' }
-  if has_moonscript
-    look_for[#look_for + 1] = 'lint_config.moon'
-
-  exists = (f) ->
-    fh = io.open f, 'r'
-    if fh
-      fh\close!
-      return true
-
-    false
-
-  path = path\match('(.+)[/\\].+$') or path
-  while path
-    for name in *look_for
-      config = "#{path}/#{name}"
-      return config if exists(config)
-
-    path = path\match('(.+)[/\\].+$')
-
-  nil
-
-load_config = (config_file, file) ->
-  loader = loadfile
-  if config_file\match('.moon$')
-    loader = require("moonscript.base").loadfile
-
-  chunk = assert loader(config_file)
-  config = chunk! or {}
-  opts = { }
-  if config.whitelist_globals
-    wl = {}
-    for k, v in pairs config.whitelist_globals
-      if file\find(k)
-        for token in *v
-          append wl, token
-
-    opts.global_whitelist = wl
-
-  opts
-
 lint = (code, opts = {}) ->
   tree, err = parse.string code
   return nil, err unless tree
+  require('moon').p(tree) if opts.print_tree
   scope = Scope tree
   walk tree, scope
   report scope, code, opts
@@ -471,9 +369,9 @@ lint_file = (file, opts = {}) ->
   fh = assert io.open file, 'r'
   code = fh\read '*a'
   fh\close!
-  config_file = opts.lint_config or config_for(file)
-  opts = config_file and load_config(config_file, file) or {}
+  config_file = opts.lint_config or config.config_for(file)
+  opts = config_file and config.load_config_from(config_file, file) or {}
   opts.file = file
   lint code, opts
 
-:lint, :lint_file, :config_for, :load_config, :format_inspections
+:lint, :lint_file, :format_inspections, :config
