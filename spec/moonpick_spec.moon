@@ -233,15 +233,21 @@ describe 'moonpick', ->
       res = lint code
       assert.same {}, res
 
-    it 'detects unused decomposition variables', ->
+    it 'detects unused destructured variables', ->
       code = clean [[
       {:foo} = _G.bar
       {bar: other} = _G.zed
+      {frob} = {1,2}
+      {numbers: {first}} = _G.frob
+      {props: {color: my_col}} = _G.what
       ]]
       res = lint code, {}
       assert.same {
         {line: 1, msg: 'declared but unused - `foo`'}
         {line: 2, msg: 'declared but unused - `other`'}
+        {line: 3, msg: 'declared but unused - `frob`'}
+        {line: 4, msg: 'declared but unused - `first`'}
+        {line: 5, msg: 'declared but unused - `my_col`'}
       }, res
 
       code = '{:foo, :bar} = _G.bar'
@@ -270,6 +276,24 @@ describe 'moonpick', ->
       res = lint code, {}
       assert.same {
         {line: 1, msg: 'declared but unused - `foo`'}
+      }, res
+
+    it 'detects unused destructured variables in for each loops', ->
+      code = clean [[
+        for {foo} in *{2, 3}
+          _G.other!
+
+        for {:bar} in *{2, 3}
+          _G.other!
+
+        for {bar: zed} in *{2, 3}
+          _G.other!
+      ]]
+      res = lint code
+      assert.same {
+        {line: 1, msg: 'declared but unused - `foo`'}
+        {line: 4, msg: 'declared but unused - `bar`'}
+        {line: 7, msg: 'declared but unused - `zed`'}
       }, res
 
     it 'does not warn for used vars in decorated statements', ->
@@ -396,7 +420,7 @@ describe 'moonpick', ->
       res = lint code
       assert.same {}, res
 
-    it 'handles variables assigned with decomposition correctly', ->
+    it 'handles variables assigned with destructuring correctly', ->
       code = clean [[
         {foo, bar} = _G.zed
         foo + bar
