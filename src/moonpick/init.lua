@@ -6,12 +6,22 @@ do
 end
 local config = require("moonpick.config")
 local append = table.insert
+local add
+add = function(map, key, val)
+  local list = map[key]
+  if not (list) then
+    list = { }
+    map[key] = list
+  end
+  return append(list, val)
+end
 local Scope
 Scope = function(node, parent)
   assert(node, "Missing node")
   local declared = { }
   local used = { }
   local scopes = { }
+  local shadowing_decls = { }
   local pos = node[-1]
   if not pos and parent then
     pos = parent.pos
@@ -20,6 +30,7 @@ Scope = function(node, parent)
     parent = parent,
     declared = declared,
     used = used,
+    shadowing_decls = shadowing_decls,
     scopes = scopes,
     node = node,
     pos = pos,
@@ -40,29 +51,32 @@ Scope = function(node, parent)
       return parent:has_parent(type)
     end,
     add_declaration = function(self, name, opts)
-      declared[name] = opts
+      if parent and parent:has_declared(name) then
+        add(shadowing_decls, name, opts)
+      end
+      return add(declared, name, opts)
     end,
     add_assignment = function(self, name, ass)
       if self:has_declared(name) then
         return 
       end
       if not parent or not parent:has_declared(name) then
-        declared[name] = ass
+        return add(declared, name, ass)
       end
     end,
     add_ref = function(self, name, ref)
       if declared[name] then
-        used[name] = ref
+        return add(used, name, ref)
       else
         if parent and parent:has_declared(name) then
           return parent:add_ref(name, ref)
         else
-          used[name] = ref
+          return add(used, name, ref)
         end
       end
     end,
-    open_scope = function(self, node, type)
-      local scope = Scope(node, self)
+    open_scope = function(self, sub_node, type)
+      local scope = Scope(sub_node, self)
       scope.type = type
       append(scopes, scope)
       return scope
@@ -108,6 +122,14 @@ is_loop_assignment = function(list)
   local op = c_target[1][1]
   return op == 'for' or op == 'foreach'
 end
+local is_fndef_assignment
+is_fndef_assignment = function(list)
+  local node = list[1]
+  if not (type(node) == 'table') then
+    return false
+  end
+  return node[1] == 'fndef'
+end
 local handlers = {
   update = function(node, scope, walk)
     local target, val = node[2], node[4]
@@ -140,6 +162,10 @@ local handlers = {
         scope.is_wrapper = true
       end
     end
+    local is_fndef = is_fndef_assignment(values)
+    if not (is_fndef) then
+      walk(values, scope)
+    end
     for _index_0 = 1, #targets do
       local t = targets[_index_0]
       local _exp_0 = t[1]
@@ -164,7 +190,9 @@ local handlers = {
         end
       end
     end
-    return walk(values, scope)
+    if is_fndef then
+      return walk(values, scope)
+    end
   end,
   chain = function(node, scope, walk)
     if not scope.is_wrapper and is_loop_assignment({
@@ -241,6 +269,9 @@ local handlers = {
     if not (scope.is_wrapper) then
       scope = scope:open_scope(node, 'for-each')
     end
+    if args then
+      walk(args, scope)
+    end
     for _index_0 = 1, #vars do
       local name = vars[_index_0]
       if type(name) == 'string' then
@@ -249,9 +280,6 @@ local handlers = {
           type = 'loop-var'
         })
       end
-    end
-    if args then
-      walk(args, scope)
     end
     return walk(body, scope)
   end,
@@ -436,44 +464,54 @@ report_on_scope = function(scope, evaluator, inspections)
   if inspections == nil then
     inspections = { }
   end
-  for name, decl in pairs(scope.declared) do
+  for name, decls in pairs(scope.declared) do
     local _continue_0 = false
     repeat
       if scope.used[name] then
         _continue_0 = true
         break
       end
-      if decl.is_exported or scope.exported_from and scope.exported_from < decl.pos then
-        _continue_0 = true
-        break
+      for _index_0 = 1, #decls do
+        local _continue_1 = false
+        repeat
+          local decl = decls[_index_0]
+          if decl.is_exported or scope.exported_from and scope.exported_from < decl.pos then
+            _continue_1 = true
+            break
+          end
+          if decl.type == 'param' then
+            if evaluator.allow_unused_param(name) then
+              _continue_1 = true
+              break
+            end
+          elseif decl.type == 'loop-var' then
+            if evaluator.allow_unused_loop_variable(name) then
+              _continue_1 = true
+              break
+            end
+          else
+            if evaluator.allow_unused(name) then
+              _continue_1 = true
+              break
+            end
+          end
+          append(inspections, {
+            msg = "declared but unused - `" .. tostring(name) .. "`",
+            pos = decl.pos or scope.pos
+          })
+          _continue_1 = true
+        until true
+        if not _continue_1 then
+          break
+        end
       end
-      if decl.type == 'param' then
-        if evaluator.allow_unused_param(name) then
-          _continue_0 = true
-          break
-        end
-      elseif decl.type == 'loop-var' then
-        if evaluator.allow_unused_loop_variable(name) then
-          _continue_0 = true
-          break
-        end
-      else
-        if evaluator.allow_unused(name) then
-          _continue_0 = true
-          break
-        end
-      end
-      append(inspections, {
-        msg = "declared but unused - `" .. tostring(name) .. "`",
-        pos = decl.pos or scope.pos
-      })
       _continue_0 = true
     until true
     if not _continue_0 then
       break
     end
   end
-  for name, node in pairs(scope.used) do
+  for name, nodes in pairs(scope.used) do
     local _continue_0 = false
     repeat
       if not (scope.declared[name] or evaluator.allow_global_access(name)) then
@@ -483,10 +521,13 @@ report_on_scope = function(scope, evaluator, inspections)
             break
           end
         end
-        append(inspections, {
-          msg = "accessing global - `" .. tostring(name) .. "`",
-          pos = node.pos or scope.pos
-        })
+        for _index_0 = 1, #nodes do
+          local node = nodes[_index_0]
+          append(inspections, {
+            msg = "accessing global - `" .. tostring(name) .. "`",
+            pos = node.pos or scope.pos
+          })
+        end
       end
       _continue_0 = true
     until true
@@ -494,10 +535,21 @@ report_on_scope = function(scope, evaluator, inspections)
       break
     end
   end
+  for name, nodes in pairs(scope.shadowing_decls) do
+    if not (evaluator.allow_shadowing(name)) then
+      for _index_0 = 1, #nodes do
+        local node = nodes[_index_0]
+        append(inspections, {
+          msg = "shadowing outer variable - `" .. tostring(name) .. "`",
+          pos = node.pos or scope.pos
+        })
+      end
+    end
+  end
   local _list_0 = scope.scopes
   for _index_0 = 1, #_list_0 do
-    local scope = _list_0[_index_0]
-    report_on_scope(scope, evaluator, inspections)
+    local sub_scope = _list_0[_index_0]
+    report_on_scope(sub_scope, evaluator, inspections)
   end
   return inspections
 end

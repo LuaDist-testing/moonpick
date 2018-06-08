@@ -7,11 +7,20 @@ config = require "moonpick.config"
 
 append = table.insert
 
+add = (map, key, val) ->
+  list = map[key]
+  unless list
+    list = {}
+    map[key] = list
+
+  append list, val
+
 Scope = (node, parent) ->
   assert node, "Missing node"
   declared = {}
   used = {}
   scopes = {}
+  shadowing_decls = {}
   pos = node[-1]
   if not pos and parent
     pos = parent.pos
@@ -20,6 +29,7 @@ Scope = (node, parent) ->
     :parent,
     :declared,
     :used,
+    :shadowing_decls,
     :scopes,
     :node,
     :pos,
@@ -35,23 +45,26 @@ Scope = (node, parent) ->
       return parent\has_parent type
 
     add_declaration: (name, opts) =>
-      declared[name] = opts
+      if parent and parent\has_declared(name)
+        add shadowing_decls, name, opts
+
+      add declared, name, opts
 
     add_assignment: (name, ass) =>
       return if @has_declared name
       if not parent or not parent\has_declared(name)
-        declared[name] = ass
+        add declared, name, ass
 
     add_ref: (name, ref) =>
       if declared[name]
-        used[name] = ref
+        add used, name, ref
       else if parent and parent\has_declared(name)
         parent\add_ref name, ref
       else
-        used[name] = ref
+        add used, name, ref
 
-    open_scope: (node, type) =>
-      scope = Scope node, @
+    open_scope: (sub_node, type) =>
+      scope = Scope sub_node, @
       scope.type = type
       append scopes, scope
       scope
@@ -78,6 +91,11 @@ is_loop_assignment = (list) ->
   op = c_target[1][1]
   op == 'for' or op == 'foreach'
 
+is_fndef_assignment = (list) ->
+  node = list[1]
+  return false unless type(node) == 'table'
+  node[1] == 'fndef'
+
 handlers = {
   update: (node, scope, walk) ->
     target, val = node[2], node[4]
@@ -94,6 +112,7 @@ handlers = {
 
     walk {val}, scope
 
+  -- x, y = foo!, ...
   assign: (node, scope, walk) ->
     targets = node[2]
     values = node[3]
@@ -103,6 +122,12 @@ handlers = {
       if is_loop_assignment(values)
         scope = scope\open_scope node, 'loop-assignment'
         scope.is_wrapper = true
+
+    is_fndef = is_fndef_assignment values
+
+    -- values are walked before the lvalue, except for fndefs where
+    -- the lvalue is implicitly local
+    walk values, scope unless is_fndef
 
     for t in *targets
       switch t[1] -- type of target
@@ -118,7 +143,7 @@ handlers = {
               if type(field) == 'table' and field[1] == 'ref'
                 scope\add_assignment field[2], { pos: field[-1] or pos }
 
-    walk values, scope
+    walk values, scope if is_fndef
 
   chain: (node, scope, walk) ->
     if not scope.is_wrapper and is_loop_assignment({node})
@@ -171,11 +196,12 @@ handlers = {
     unless scope.is_wrapper
       scope = scope\open_scope node, 'for-each'
 
+    walk args, scope if args
+
     for name in *vars
       if type(name) == 'string'
         scope\add_declaration name, pos: node[-1], type: 'loop-var'
 
-    walk args, scope if args
     walk body, scope
 
   declare_with_shadows: (node, scope, walk) ->
@@ -301,36 +327,50 @@ walk = (tree, scope) ->
 
 report_on_scope = (scope, evaluator, inspections = {}) ->
 
-  for name, decl in pairs scope.declared
+  -- Declared but unused variables
+  for name, decls in pairs scope.declared
     continue if scope.used[name]
-    if decl.is_exported or scope.exported_from and scope.exported_from < decl.pos
-      continue
 
-    if decl.type == 'param'
-      continue if evaluator.allow_unused_param(name)
-    elseif decl.type == 'loop-var'
-      continue if evaluator.allow_unused_loop_variable(name)
-    else
-      continue if evaluator.allow_unused(name)
+    for decl in *decls
+      if decl.is_exported or scope.exported_from and scope.exported_from < decl.pos
+        continue
 
-    append inspections, {
-      msg: "declared but unused - `#{name}`"
-      pos: decl.pos or scope.pos,
-    }
+      if decl.type == 'param'
+        continue if evaluator.allow_unused_param(name)
+      elseif decl.type == 'loop-var'
+        continue if evaluator.allow_unused_loop_variable(name)
+      else
+        continue if evaluator.allow_unused(name)
 
-  for name, node in pairs scope.used
+      append inspections, {
+        msg: "declared but unused - `#{name}`"
+        pos: decl.pos or scope.pos,
+      }
+
+  -- Used but undefined references
+  for name, nodes in pairs scope.used
     unless scope.declared[name] or evaluator.allow_global_access(name)
       if name == 'self' or name == 'super'
         if scope.type == 'method' or scope\has_parent('method')
           continue
 
-      append inspections, {
-        msg: "accessing global - `#{name}`"
-        pos: node.pos or scope.pos,
-      }
+      for node in *nodes
+        append inspections, {
+          msg: "accessing global - `#{name}`"
+          pos: node.pos or scope.pos,
+        }
 
-  for scope in *scope.scopes
-    report_on_scope scope, evaluator, inspections
+    -- Shadowing declarations
+  for name, nodes in pairs scope.shadowing_decls
+    unless evaluator.allow_shadowing(name)
+      for node in *nodes
+        append inspections, {
+          msg: "shadowing outer variable - `#{name}`"
+          pos: node.pos or scope.pos,
+        }
+
+  for sub_scope in *scope.scopes
+    report_on_scope sub_scope, evaluator, inspections
 
   inspections
 

@@ -315,6 +315,24 @@ describe 'moonpick', ->
         {line: 1, msg: 'accessing global - `foo`'}
       }, res
 
+    it 'detected undeclared accesses for chained expressions', ->
+      code = 'foo.x'
+      res = lint code, {}
+      assert.same {
+        {line: 1, msg: 'accessing global - `foo`'}
+      }, res
+
+    it 'reports each undeclared usage separately', ->
+      code = clean [[
+        x 1
+        x 2
+      ]]
+      res = lint code, {}
+      assert.same {
+        {line: 1, msg: 'accessing global - `x`'}
+        {line: 2, msg: 'accessing global - `x`'}
+      }, res
+
     it 'includes built-ins in the global whitelist', ->
       code = clean [[
         x = tostring(_G.foo)
@@ -394,16 +412,6 @@ describe 'moonpick', ->
       res = lint code
       assert.same {}, res
 
-    it 'handles scope shadowing correctly', ->
-      code = clean [[
-        (a) ->
-          [ { a, b } for a, b in pairs {} ]
-      ]]
-      res = lint code, report_params: true
-      assert.same {
-        {line: 1, msg: 'declared but unused - `a`'}
-      }, res
-
     it 'handles non-prefixed member access', ->
       code = clean [[
         class Foo
@@ -459,3 +467,77 @@ describe 'moonpick', ->
         =====================================
         > {bar: other} = _G.zed
       ]]), moonpick.format_inspections(inspections)
+
+  describe 'shadowing warnings', ->
+    it 'detects shadowing outer variables in for each', ->
+      code = clean [[
+        x = 2
+        for x in *{1,2}
+          _G.other x
+        x
+      ]]
+      res = lint code, {}
+      assert.same {
+        {line: 2, msg: 'shadowing outer variable - `x`'}
+      }, res
+
+    it 'detects shadowing using local statements', ->
+      code = clean [[
+        x = 2
+        ->
+          local x
+          x = 2
+          x * 2
+        x
+      ]]
+      res = lint code, {}
+      assert.same {
+        {line: 3, msg: 'shadowing outer variable - `x`'}
+      }, res
+
+    it 'understand lexical scoping', ->
+      code = clean [[
+        for x in *{1,2}
+          _G.other x
+        x = 2 -- defined after previous declaration
+        x
+      ]]
+      res = lint code, {}
+      assert.same {}, res
+
+    it 'rvalue declaration values generally does not shadow lvalues', ->
+      code = clean [[
+        x = { -- assignment lvalue target
+          f: (x) -> -- this is part of the rvalue
+        }
+        x
+      ]]
+      res = lint code, {}
+      assert.same {}, res
+
+    it 'implicitly local lvalue declarations are recognized (i.e. fndefs)', ->
+      code = clean [[
+        f = (x) -> x + f(x + 1)
+        f
+      ]]
+      res = lint code, {}
+      assert.same {}, res
+
+    it 'does not complain about foreach comprehension vars shadowing target', ->
+      code = clean [[
+        for x in *[x for x in *_G.foo when x != 'bar' ]
+          x!
+      ]]
+      res = lint code, {}
+      assert.same {}, res
+
+    it 'handles scope shadowing and unused variables correctly', ->
+      code = clean [[
+        (a) ->
+          [ { a, b } for a, b in pairs {} ]
+      ]]
+      res = lint code, report_params: true
+      assert.same {
+        {line: 1, msg: 'declared but unused - `a`'},
+        {line: 2, msg: 'shadowing outer variable - `a`'}
+      }, res
