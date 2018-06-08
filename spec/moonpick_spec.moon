@@ -79,6 +79,21 @@ describe 'moonpick', ->
         {line: 9, msg: 'accessing global - `x`'}
       }, res
 
+    it 'detects unused variables in with statements', ->
+      code = clean [[
+        with _G.foo
+          x = 1
+        with _G.bar
+          x = 2
+        x = 3
+        x
+      ]]
+      res = lint code, {}
+      assert.same {
+        {line: 2, msg: 'declared but unused - `x`'}
+        {line: 4, msg: 'declared but unused - `x`'}
+      }, res
+
     it 'detects while scoped unused variables', ->
       code = clean [[
         while true
@@ -98,6 +113,14 @@ describe 'moonpick', ->
           y
         x
        ]]
+      res = lint code, {}
+      assert.same {}, res
+
+    it 'handles inline with variable assignment statements', ->
+      code = clean [[
+        with foo = 2
+          foo += 3
+      ]]
       res = lint code, {}
       assert.same {}, res
 
@@ -218,10 +241,14 @@ describe 'moonpick', ->
       assert.same {}, res
 
     it 'detects unused imports', ->
-      code = 'import foo from _G.bar'
-      res = lint code, {}
+      code = clean [[
+        import foo from _G.bar
+        import \func from _G.thing
+      ]]
+      res = lint code
       assert.same {
         {line: 1, msg: 'declared but unused - `foo`'}
+        {line: 2, msg: 'declared but unused - `func`'}
       }, res
 
     it 'detects usages in import source lists', ->
@@ -454,10 +481,10 @@ describe 'moonpick', ->
       res = lint code
       assert.same {}, res
 
-    it 'foo2', ->
+    it 'handles "with" statement assignments', ->
       code = clean [[
-        if _G.data and _G.data.tokens
-          _G.data.tokens[token] = true for token in pairs _G.tokens
+        with x = 2
+          .y + 2
       ]]
       res = lint code
       assert.same {}, res
@@ -564,4 +591,15 @@ describe 'moonpick', ->
       assert.same {
         {line: 1, msg: 'declared but unused - `a`'},
         {line: 2, msg: 'shadowing outer variable - `a`'}
+      }, res
+
+    it 'handles shadowing with decorated statements correctly', ->
+      code = clean [[
+        x = 1
+        (arg) -> x! for x in *arg
+      ]]
+      res = lint code, {}
+      assert.same {
+        {line: 1, msg: 'declared but unused - `x`'},
+        {line: 2, msg: 'shadowing outer variable - `x`'}
       }, res
